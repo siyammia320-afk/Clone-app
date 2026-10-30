@@ -514,7 +514,7 @@ fun ManageCloneDialog(
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Install APK", color = Color(0xFF00E676))
+                        Text("Home Icon", color = Color(0xFF00E676))
                     }
                 }
 

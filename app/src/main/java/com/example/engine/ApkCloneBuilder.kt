@@ -3,6 +3,16 @@ package com.example.engine
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ShortcutInfo
+import android.content.pm.ShortcutManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Typeface
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
 import android.widget.Toast
@@ -44,15 +54,10 @@ object ApkCloneBuilder {
         0xFFFF5252L  // Crimson Red
     )
 
-    /**
-     * Generates a same-length mutated package name for binary AXML safety when possible,
-     * plus a human-readable cloned package identifier.
-     */
     fun generateClonedPackageName(originalPackage: String, cloneNumber: Int): String {
         val suffix = String.format("c%02d", cloneNumber.coerceIn(1, 999))
         if (originalPackage.length > suffix.length + 4) {
             val prefix = originalPackage.substring(0, originalPackage.length - suffix.length)
-            // Keep valid package segments
             val sanitizedPrefix = if (prefix.endsWith(".")) {
                 prefix.dropLast(1) + "x"
             } else {
@@ -76,7 +81,7 @@ object ApkCloneBuilder {
     }
 
     /**
-     * Creates an isolated sandbox file tree and builds a patched Clone APK from the source APK.
+     * Creates an isolated sandbox file tree for the cloned app instance.
      */
     suspend fun buildCloneInstance(
         context: Context,
@@ -92,14 +97,12 @@ object ApkCloneBuilder {
         val virtualDeviceId = generateVirtualDeviceId(cloneNumber)
         val virtualModel = pickDeviceModel(cloneNumber)
 
-        // 1. Create isolated sandbox directory for this specific clone instance
         val sandboxRoot = File(context.filesDir, "omnispace_sandboxes/$spaceId/${appInfo.packageName}_clone_$cloneNumber")
         val prefsDir = File(sandboxRoot, "shared_prefs").apply { mkdirs() }
         val dbDir = File(sandboxRoot, "databases").apply { mkdirs() }
         val cacheDir = File(sandboxRoot, "cache").apply { mkdirs() }
         val filesSubDir = File(sandboxRoot, "files").apply { mkdirs() }
 
-        // Write isolated virtual identity & multi-account session descriptor
         val identityFile = File(prefsDir, "omnispace_virtual_identity.json")
         val identityJson = """
             {
@@ -117,7 +120,6 @@ object ApkCloneBuilder {
         """.trimIndent()
         identityFile.writeText(identityJson, StandardCharsets.UTF_8)
 
-        // Create isolated cookie/session store marker inside databases & files
         File(dbDir, "account_session_slot_$cloneNumber.db").writeBytes(
             "OMNISPACE_ISOLATED_SQLITE_SLOT_${cloneNumber}_$virtualDeviceId".toByteArray(StandardCharsets.UTF_8)
         )
@@ -127,31 +129,7 @@ object ApkCloneBuilder {
         )
         File(cacheDir, "session_cache.bin").writeBytes(ByteArray(2048) { (it % 255).toByte() })
 
-        // 2. Build patched Clone APK file if source APK is accessible and requested
-        val clonesOutDir = File(context.getExternalFilesDir(null) ?: context.filesDir, "cloned_apks").apply {
-            mkdirs()
-        }
-        val outputApkFile = File(clonesOutDir, "${appInfo.packageName}_clone_${cloneNumber}.apk")
-
-        if (generateApkPackage && appInfo.sourceApkPath.isNotEmpty()) {
-            val sourceFile = File(appInfo.sourceApkPath)
-            if (sourceFile.exists() && sourceFile.canRead()) {
-                runCatching {
-                    patchApkManifestPackage(
-                        sourceApk = sourceFile,
-                        destApk = outputApkFile,
-                        originalPackage = appInfo.packageName,
-                        newPackage = clonedPkg
-                    )
-                }.onFailure {
-                    // Fallback: copy base APK stream with clone metadata entry
-                    runCatching { sourceFile.copyTo(outputApkFile, overwrite = true) }
-                }
-            }
-        }
-
-        val totalBytes = calculateDirectorySize(sandboxRoot) +
-            if (outputApkFile.exists()) outputApkFile.length() else 0L
+        val totalBytes = calculateDirectorySize(sandboxRoot)
 
         ClonedAppEntity(
             originalPackageName = appInfo.packageName,
@@ -164,120 +142,147 @@ object ApkCloneBuilder {
             badgeColorHex = badgeColorHex,
             virtualDeviceId = virtualDeviceId,
             virtualModelName = virtualModel,
-            apkOutputPath = if (outputApkFile.exists()) outputApkFile.absolutePath else "",
+            apkOutputPath = "",
             sandboxDirPath = sandboxRoot.absolutePath,
             storageBytes = totalBytes
         )
     }
 
     /**
-     * Patches AndroidManifest.xml inside the APK zip by replacing same-length UTF-16LE and UTF-8
-     * package name strings so binary AXML chunk offsets remain strictly intact, and adds
-     * assets/omnispace_clone_profile.json for multi-instance identification.
+     * Pins a direct Home Screen Launcher icon for this specific clone (#1, #2, ... #10)
+     * with a numbered badge overlay so the user can see and open the clone directly from their phone launcher!
      */
-    private fun patchApkManifestPackage(
-        sourceApk: File,
-        destApk: File,
-        originalPackage: String,
-        newPackage: String
-    ) {
-        val safeReplacement = if (newPackage.length == originalPackage.length) {
-            newPackage
-        } else if (newPackage.length > originalPackage.length) {
-            newPackage.take(originalPackage.length)
-        } else {
-            newPackage.padEnd(originalPackage.length, 'x')
+    fun pinCloneShortcutToHomeScreen(context: Context, clone: ClonedAppEntity) {
+        val launchIntent = Intent(context, CloneLauncherActivity::class.java).apply {
+            action = Intent.ACTION_VIEW
+            data = Uri.parse("omnispace://clone/${clone.originalPackageName}/${clone.cloneNumber}/${clone.id}")
+            putExtra(CloneLauncherActivity.EXTRA_ORIGINAL_PKG, clone.originalPackageName)
+            putExtra(CloneLauncherActivity.EXTRA_CLONED_PKG, clone.clonedPackageName)
+            putExtra(CloneLauncherActivity.EXTRA_CLONE_NUMBER, clone.cloneNumber)
+            putExtra(CloneLauncherActivity.EXTRA_CUSTOM_NAME, clone.customName)
+            putExtra(CloneLauncherActivity.EXTRA_ACCOUNT_TAG, clone.accountTag)
+            putExtra(CloneLauncherActivity.EXTRA_VIRTUAL_DEVICE_ID, clone.virtualDeviceId)
+            putExtra(CloneLauncherActivity.EXTRA_SANDBOX_PATH, clone.sandboxDirPath)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
+            addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
 
-        val origUtf8 = originalPackage.toByteArray(StandardCharsets.UTF_8)
-        val replUtf8 = safeReplacement.toByteArray(StandardCharsets.UTF_8)
+        val badgedBitmap = createBadgedShortcutBitmap(
+            context = context,
+            packageName = clone.originalPackageName,
+            cloneNumber = clone.cloneNumber,
+            badgeColorHex = clone.badgeColorHex
+        )
 
-        val origUtf16 = originalPackage.toByteArray(StandardCharsets.UTF_16LE)
-        val replUtf16 = safeReplacement.toByteArray(StandardCharsets.UTF_16LE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val shortcutManager = context.getSystemService(ShortcutManager::class.java)
+            if (shortcutManager != null && shortcutManager.isRequestPinShortcutSupported) {
+                val shortcutInfo = ShortcutInfo.Builder(
+                    context,
+                    "omnispace_clone_${clone.originalPackageName}_${clone.cloneNumber}_${clone.id}"
+                )
+                    .setShortLabel(clone.customName)
+                    .setLongLabel("${clone.customName} (${clone.accountTag})")
+                    .setIcon(Icon.createWithBitmap(badgedBitmap))
+                    .setIntent(launchIntent)
+                    .build()
 
-        ZipInputStream(BufferedInputStream(FileInputStream(sourceApk))).use { zis ->
-            ZipOutputStream(BufferedOutputStream(FileOutputStream(destApk))).use { zos ->
-                val buffer = ByteArray(16 * 1024)
-                var entry: ZipEntry? = zis.nextEntry
-                while (entry != null) {
-                    val entryName = entry.name
-                    if (entryName == "AndroidManifest.xml") {
-                        val manifestBytes = zis.readBytes()
-                        replaceBytesInPlace(manifestBytes, origUtf16, replUtf16)
-                        replaceBytesInPlace(manifestBytes, origUtf8, replUtf8)
-
-                        val newEntry = ZipEntry(entryName)
-                        zos.putNextEntry(newEntry)
-                        zos.write(manifestBytes)
-                        zos.closeEntry()
-                    } else {
-                        val newEntry = ZipEntry(entryName)
-                        if (entry.method == ZipEntry.STORED) {
-                            val rawBytes = zis.readBytes()
-                            newEntry.method = ZipEntry.STORED
-                            newEntry.size = rawBytes.size.toLong()
-                            newEntry.compressedSize = rawBytes.size.toLong()
-                            val crc = CRC32()
-                            crc.update(rawBytes)
-                            newEntry.crc = crc.value
-                            zos.putNextEntry(newEntry)
-                            zos.write(rawBytes)
-                            zos.closeEntry()
-                        } else {
-                            zos.putNextEntry(newEntry)
-                            var len: Int
-                            while (zis.read(buffer).also { len = it } > 0) {
-                                zos.write(buffer, 0, len)
-                            }
-                            zos.closeEntry()
-                        }
-                    }
-                    entry = zis.nextEntry
+                val requested = shortcutManager.requestPinShortcut(shortcutInfo, null)
+                if (requested) {
+                    Toast.makeText(
+                        context,
+                        "Adding '${clone.customName}' icon to your Phone Home Screen!",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return
                 }
-
-                // Embed clone profile configuration inside assets/
-                val metaEntry = ZipEntry("assets/omnispace_clone_config.json")
-                zos.putNextEntry(metaEntry)
-                val metaBytes = """{"original":"$originalPackage","cloned":"$safeReplacement"}"""
-                    .toByteArray(StandardCharsets.UTF_8)
-                zos.write(metaBytes)
-                zos.closeEntry()
             }
         }
+
+        // Legacy fallback broadcast for older launchers
+        @Suppress("DEPRECATION")
+        val legacyIntent = Intent("com.android.launcher.action.INSTALL_SHORTCUT").apply {
+            putExtra("duplicate", false)
+            putExtra(Intent.EXTRA_SHORTCUT_NAME, clone.customName)
+            putExtra(Intent.EXTRA_SHORTCUT_ICON, badgedBitmap)
+            putExtra(Intent.EXTRA_SHORTCUT_INTENT, launchIntent)
+        }
+        context.sendBroadcast(legacyIntent)
+        Toast.makeText(
+            context,
+            "Shortcut sent to Home Screen for ${clone.customName}!",
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
-    private fun replaceBytesInPlace(data: ByteArray, target: ByteArray, replacement: ByteArray) {
-        if (target.isEmpty() || target.size != replacement.size || data.size < target.size) return
-        var i = 0
-        while (i <= data.size - target.size) {
-            var match = true
-            for (j in target.indices) {
-                if (data[i + j] != target[j]) {
-                    match = false
-                    break
-                }
-            }
-            if (match) {
-                System.arraycopy(replacement, 0, data, i, replacement.size)
-                i += target.size
+    private fun createBadgedShortcutBitmap(
+        context: Context,
+        packageName: String,
+        cloneNumber: Int,
+        badgeColorHex: Long
+    ): Bitmap {
+        val size = 192
+        val result = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(result)
+
+        val baseDrawable: Drawable? = runCatching {
+            context.packageManager.getApplicationIcon(packageName)
+        }.getOrNull()
+
+        if (baseDrawable != null) {
+            if (baseDrawable is BitmapDrawable && baseDrawable.bitmap != null) {
+                val scaled = Bitmap.createScaledBitmap(baseDrawable.bitmap, size, size, true)
+                canvas.drawBitmap(scaled, 0f, 0f, null)
             } else {
-                i++
+                baseDrawable.setBounds(0, 0, size, size)
+                baseDrawable.draw(canvas)
             }
+        } else {
+            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF1E293B.toInt() }
+            canvas.drawRoundRect(RectF(0f, 0f, size.toFloat(), size.toFloat()), 36f, 36f, bgPaint)
         }
+
+        // Draw numbered clone badge at bottom-right corner
+        val badgeText = "#$cloneNumber"
+        val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = badgeColorHex.toInt()
+        }
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFF090D16.toInt()
+            style = Paint.Style.STROKE
+            strokeWidth = 6f
+        }
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFF050A14.toInt()
+            textSize = 36f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            textAlign = Paint.Align.CENTER
+        }
+
+        val badgeRect = RectF(size - 92f, size - 58f, size - 4f, size - 4f)
+        canvas.drawRoundRect(badgeRect, 26f, 26f, badgePaint)
+        canvas.drawRoundRect(badgeRect, 26f, 26f, borderPaint)
+
+        val textY = badgeRect.centerY() - (textPaint.descent() + textPaint.ascent()) / 2f
+        canvas.drawText(badgeText, badgeRect.centerX(), textY, textPaint)
+
+        return result
     }
 
-    /**
-     * Ensures the patched Clone APK file exists on disk (rebuilding it on demand if needed)
-     * and launches Android's Package Installer via FileProvider.
-     */
     suspend fun ensureAndInstallCloneApk(
         context: Context,
         clone: ClonedAppEntity
-    ): Result<File> = withContext(Dispatchers.IO) {
+    ): Result<File> = withContext(Dispatchers.Main) {
         runCatching {
-            val outFile = if (clone.apkOutputPath.isNotEmpty() && File(clone.apkOutputPath).exists()) {
-                File(clone.apkOutputPath)
-            } else {
+            pinCloneShortcutToHomeScreen(context, clone)
+            File(clone.sandboxDirPath)
+        }
+    }
+
+    suspend fun shareCloneApk(context: Context, clone: ClonedAppEntity): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
                 val pm = context.packageManager
                 val appInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     pm.getApplicationInfo(clone.originalPackageName, PackageManager.ApplicationInfoFlags.of(0L))
@@ -289,65 +294,16 @@ object ApkCloneBuilder {
                 val clonesOutDir = File(context.getExternalFilesDir(null) ?: context.filesDir, "cloned_apks").apply {
                     mkdirs()
                 }
-                val generated = File(clonesOutDir, "${clone.originalPackageName}_clone_${clone.cloneNumber}.apk")
-                patchApkManifestPackage(
-                    sourceApk = sourceApk,
-                    destApk = generated,
-                    originalPackage = clone.originalPackageName,
-                    newPackage = clone.clonedPackageName
-                )
-                generated
-            }
-
-            withContext(Dispatchers.Main) {
-                val uri: Uri = FileProvider.getUriForFile(
-                    context,
-                    "${context.packageName}.fileprovider",
-                    outFile
-                )
-                val installIntent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, "application/vnd.android.package-archive")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(installIntent)
-            }
-            outFile
-        }
-    }
-
-    suspend fun shareCloneApk(context: Context, clone: ClonedAppEntity): Result<Unit> =
-        withContext(Dispatchers.IO) {
-            runCatching {
-                val outFile = if (clone.apkOutputPath.isNotEmpty() && File(clone.apkOutputPath).exists()) {
-                    File(clone.apkOutputPath)
-                } else {
-                    val pm = context.packageManager
-                    val appInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        pm.getApplicationInfo(clone.originalPackageName, PackageManager.ApplicationInfoFlags.of(0L))
-                    } else {
-                        @Suppress("DEPRECATION")
-                        pm.getApplicationInfo(clone.originalPackageName, 0)
-                    }
-                    val sourceApk = File(appInfo.sourceDir)
-                    val clonesOutDir = File(context.getExternalFilesDir(null) ?: context.filesDir, "cloned_apks").apply {
-                        mkdirs()
-                    }
-                    val generated = File(clonesOutDir, "${clone.originalPackageName}_clone_${clone.cloneNumber}.apk")
-                    patchApkManifestPackage(
-                        sourceApk = sourceApk,
-                        destApk = generated,
-                        originalPackage = clone.originalPackageName,
-                        newPackage = clone.clonedPackageName
-                    )
-                    generated
+                val exported = File(clonesOutDir, "${clone.originalPackageName}_clone_${clone.cloneNumber}.apk")
+                if (!exported.exists()) {
+                    sourceApk.copyTo(exported, overwrite = true)
                 }
 
                 withContext(Dispatchers.Main) {
                     val uri = FileProvider.getUriForFile(
                         context,
                         "${context.packageName}.fileprovider",
-                        outFile
+                        exported
                     )
                     val shareIntent = Intent(Intent.ACTION_SEND).apply {
                         type = "application/vnd.android.package-archive"
@@ -359,7 +315,7 @@ object ApkCloneBuilder {
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
                     context.startActivity(
-                        Intent.createChooser(shareIntent, "Export Cloned APK: ${clone.customName}")
+                        Intent.createChooser(shareIntent, "Export APK: ${clone.customName}")
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     )
                 }
@@ -368,6 +324,7 @@ object ApkCloneBuilder {
 
     fun launchClonedAppSession(context: Context, clone: ClonedAppEntity) {
         val intent = Intent(context, CloneLauncherActivity::class.java).apply {
+            action = Intent.ACTION_VIEW
             data = Uri.parse("omnispace://clone/${clone.originalPackageName}/${clone.cloneNumber}/${clone.id}")
             putExtra(CloneLauncherActivity.EXTRA_ORIGINAL_PKG, clone.originalPackageName)
             putExtra(CloneLauncherActivity.EXTRA_CLONED_PKG, clone.clonedPackageName)
@@ -396,13 +353,11 @@ object ApkCloneBuilder {
         if (sandboxDir.exists()) {
             File(sandboxDir, "cache").deleteRecursively()
             File(sandboxDir, "databases").deleteRecursively()
+            File(sandboxDir, "shared_prefs/cookie_vault.json").delete()
             File(sandboxDir, "cache").mkdirs()
             File(sandboxDir, "databases").mkdirs()
         }
-        val apkLen = if (clone.apkOutputPath.isNotEmpty() && File(clone.apkOutputPath).exists()) {
-            File(clone.apkOutputPath).length()
-        } else 0L
-        calculateDirectorySize(sandboxDir) + apkLen
+        calculateDirectorySize(sandboxDir)
     }
 
     suspend fun removeCloneFiles(clone: ClonedAppEntity) = withContext(Dispatchers.IO) {
