@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">OmniSpace Dual Cloner</string>
+    <string name="device_admin_label">OmniSpace Work Profile Manager</string>
+    <string name="device_admin_description">Enables native Android dual profile isolation for cloned applications.</string>
+    <string name="tab_spaces">My Spaces</string>
+    <string name="tab_cloner">App Cloner</string>
+    <string name="tab_apk_studio">APK Builder</string>
+    <string name="tab_security">Vault &amp; System</string>
+    <string name="search_apps_hint">Search installed apps or package name…</string>
+    <string name="empty_clones_title">No Cloned Apps in This Space</string>
+    <string name="empty_clones_subtitle">Tap \"+ Clone App\" below to select any installed app from your phone and create 1 to 10+ independent clones.</string>
+    <string name="btn_clone_app">Clone App</string>
+    <string name="btn_launch">Launch</string>
+    <string name="btn_install_apk">Install Clone APK</string>
+    <string name="btn_share_apk">Export APK</string>
+</resources>

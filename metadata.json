@@ -1,0 +1,6 @@
+{
+  "name": "OmniSpace Dual Cloner",
+  "description": "Multi-space native Android app cloner, APK package rebuilder, and isolated dual workspace manager.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
