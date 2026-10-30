@@ -22,6 +22,7 @@ data class InstalledAppInfo(
     val versionName: String,
     val versionCode: Long,
     val sourceApkPath: String,
+    val splitApkPaths: List<String> = emptyList(),
     val apkSizeBytes: Long,
     val targetSdkVersion: Int,
     val isSystemApp: Boolean
@@ -52,7 +53,11 @@ object InstalledAppsScanner {
             for (resolveInfo in resolveInfos) {
                 val activityInfo = resolveInfo.activityInfo ?: continue
                 val pkgName = activityInfo.packageName ?: continue
-                if (pkgName == context.packageName || !seenPackages.add(pkgName)) continue
+                // Skip our own host package and already-cloned packages (.clone1, .clone2, etc.)
+                if (pkgName == context.packageName ||
+                    pkgName.contains(".clone") ||
+                    !seenPackages.add(pkgName)
+                ) continue
 
                 try {
                     val appInfo = activityInfo.applicationInfo
@@ -76,6 +81,7 @@ object InstalledAppsScanner {
                     }
 
                     val sourceDir = appInfo.sourceDir ?: ""
+                    val splitDirs = appInfo.splitSourceDirs?.toList() ?: emptyList()
                     val apkSize = if (sourceDir.isNotEmpty()) {
                         runCatching { File(sourceDir).length() }.getOrDefault(0L)
                     } else 0L
@@ -83,7 +89,6 @@ object InstalledAppsScanner {
                     val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
                         (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0
 
-                    // Warm icon cache
                     if (!iconCache.containsKey(pkgName)) {
                         runCatching {
                             val drawable = appInfo.loadIcon(pm)
@@ -98,6 +103,7 @@ object InstalledAppsScanner {
                             versionName = versionName,
                             versionCode = versionCode,
                             sourceApkPath = sourceDir,
+                            splitApkPaths = splitDirs,
                             apkSizeBytes = apkSize,
                             targetSdkVersion = appInfo.targetSdkVersion,
                             isSystemApp = isSystem

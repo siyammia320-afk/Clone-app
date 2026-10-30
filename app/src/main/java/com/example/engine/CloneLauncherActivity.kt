@@ -1,26 +1,15 @@
 package com.example.engine
 
-import android.annotation.SuppressLint
 import android.app.ActivityManager
-import android.graphics.Bitmap
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
-import android.view.ViewGroup
-import android.webkit.CookieManager
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,55 +24,55 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Computer
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.LockReset
-import androidx.compose.material.icons.filled.PhoneAndroid
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.InstallMobile
+import androidx.compose.material.icons.filled.RocketLaunch
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.data.ClonedAppEntity
 import com.example.ui.components.AppIconWithBadge
 import com.example.ui.theme.MyApplicationTheme
+import java.io.File
+import kotlinx.coroutines.launch
 
 /**
- * In-App Isolated Clone Container Activity.
- * Runs the cloned app directly INSIDE OmniSpace with its own isolated CookieVault,
- * DOM Storage, and Virtual Device User-Agent so each clone (#1, #2, ... #100) has its own
- * independent account login without ever opening the phone's main installed app.
+ * Direct Native Clone APK Launcher & Installer Activity (Zero WebView / Zero Website).
+ * - If the cloned native package (e.g. com.whatsapp.clone1) is already installed on the device,
+ *   it immediately opens that native cloned app!
+ * - If not installed yet, it builds & signs the standalone native APK (V1 + V2 signature + patched AXML)
+ *   and opens Android's System Package Installer so the clone runs as a 100% real native Android app.
  */
 class CloneLauncherActivity : ComponentActivity() {
 
@@ -95,13 +84,9 @@ class CloneLauncherActivity : ComponentActivity() {
         const val EXTRA_ACCOUNT_TAG = "extra_account_tag"
         const val EXTRA_VIRTUAL_DEVICE_ID = "extra_virtual_device_id"
         const val EXTRA_SANDBOX_PATH = "extra_sandbox_path"
+        const val EXTRA_APK_OUTPUT_PATH = "extra_apk_output_path"
     }
 
-    private var activeWebView: WebView? = null
-    private var currentSandboxPath: String = ""
-    private var currentLoadedUrl: String? = null
-
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -113,11 +98,8 @@ class CloneLauncherActivity : ComponentActivity() {
         val accountTag = intent.getStringExtra(EXTRA_ACCOUNT_TAG) ?: "Account #$cloneNumber"
         val virtualDeviceId = intent.getStringExtra(EXTRA_VIRTUAL_DEVICE_ID) ?: "os01"
         val sandboxPath = intent.getStringExtra(EXTRA_SANDBOX_PATH) ?: filesDir.absolutePath
-        currentSandboxPath = sandboxPath
+        val apkOutputPath = intent.getStringExtra(EXTRA_APK_OUTPUT_PATH) ?: ""
 
-        val cloneKey = "${originalPkg}_slot_${cloneNumber}_$virtualDeviceId"
-
-        // Label this task in Android Recents with the Clone's custom name
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             setTaskDescription(
                 ActivityManager.TaskDescription.Builder()
@@ -129,38 +111,76 @@ class CloneLauncherActivity : ComponentActivity() {
             setTaskDescription(ActivityManager.TaskDescription("$customName ($accountTag)"))
         }
 
-        val endpointConfig = SandboxSessionManager.resolveAppEndpoint(
-            packageName = originalPkg,
-            appName = customName.substringBefore(" #"),
-            sandboxDir = sandboxPath
+        val dummyEntity = ClonedAppEntity(
+            originalPackageName = originalPkg,
+            originalAppName = customName,
+            clonedPackageName = clonedPkg,
+            cloneNumber = cloneNumber,
+            customName = customName,
+            accountTag = accountTag,
+            spaceId = "space_1",
+            badgeColorHex = 0xFF00E5FFL,
+            virtualDeviceId = virtualDeviceId,
+            virtualModelName = "Native Clone",
+            apkOutputPath = apkOutputPath,
+            sandboxDirPath = sandboxPath,
+            storageBytes = 0L
         )
 
         setContent {
             MyApplicationTheme(darkTheme = true, dynamicColor = false) {
-                var isSessionMounted by remember { mutableStateOf(false) }
-                var loadProgress by remember { mutableIntStateOf(10) }
-                var currentUrl by remember { mutableStateOf(endpointConfig.entryUrl) }
-                var isDesktopMode by remember { mutableStateOf(endpointConfig.requiresDesktopUaByDefault) }
-                var isHeaderExpanded by remember { mutableStateOf(false) }
-                var showUrlEditorDialog by remember { mutableStateOf(false) }
+                val scope = rememberCoroutineScope()
+                val lifecycleOwner = LocalLifecycleOwner.current
 
-                LaunchedEffect(cloneKey) {
-                    SandboxSessionManager.mountCloneSession(
-                        cloneKey = cloneKey,
-                        sandboxDir = sandboxPath,
-                        currentUrl = endpointConfig.entryUrl
-                    ) {
-                        isSessionMounted = true
+                var isBuildingApk by remember { mutableStateOf(true) }
+                var builtApkFile by remember { mutableStateOf<File?>(null) }
+                var buildError by remember { mutableStateOf<String?>(null) }
+                var isCloneInstalled by remember {
+                    mutableStateOf(ApkCloneBuilder.isClonedPackageInstalled(this, clonedPkg))
+                }
+                var autoPromptedInstall by remember { mutableStateOf(false) }
+
+                // Re-check installation state whenever user returns from System Package Installer
+                DisposableEffect(lifecycleOwner) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        if (event == Lifecycle.Event.ON_RESUME) {
+                            val nowInstalled = ApkCloneBuilder.isClonedPackageInstalled(
+                                this@CloneLauncherActivity,
+                                clonedPkg
+                            )
+                            isCloneInstalled = nowInstalled
+                        }
                     }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                 }
 
-                BackHandler {
-                    val wv = activeWebView
-                    if (wv != null && wv.canGoBack()) {
-                        wv.goBack()
+                LaunchedEffect(Unit) {
+                    if (ApkCloneBuilder.isClonedPackageInstalled(this@CloneLauncherActivity, clonedPkg)) {
+                        isCloneInstalled = true
+                        isBuildingApk = false
+                        launchInstalledClonePackage(clonedPkg)
                     } else {
-                        SandboxSessionManager.persistCloneSession(sandboxPath, currentLoadedUrl)
-                        finish()
+                        isBuildingApk = true
+                        runCatching {
+                            ApkCloneBuilder.getOrBuildSignedCloneApkFile(
+                                context = this@CloneLauncherActivity,
+                                clone = dummyEntity
+                            )
+                        }.onSuccess { file ->
+                            builtApkFile = file
+                            isBuildingApk = false
+                            if (!autoPromptedInstall) {
+                                autoPromptedInstall = true
+                                ApkCloneBuilder.promptSystemPackageInstaller(
+                                    this@CloneLauncherActivity,
+                                    file
+                                )
+                            }
+                        }.onFailure { err ->
+                            buildError = err.localizedMessage ?: "Failed to build signed Clone APK"
+                            isBuildingApk = false
+                        }
                     }
                 }
 
@@ -168,413 +188,231 @@ class CloneLauncherActivity : ComponentActivity() {
                     modifier = Modifier
                         .fillMaxSize()
                         .windowInsetsPadding(WindowInsets.safeDrawing),
-                    color = Color(0xFF090D16)
+                    color = Color(0xFF080B12)
                 ) {
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        // Compact Top In-App Container Control Bar
-                        Column(
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.radialGradient(
+                                    colors = listOf(Color(0xFF142238), Color(0xFF080B12))
+                                )
+                            )
+                            .padding(20.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .background(Color(0xFF0F172A))
+                                .border(1.dp, Color(0xFF283548), RoundedCornerShape(24.dp)),
+                            shape = RoundedCornerShape(24.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF111827))
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    .padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                IconButton(
-                                    onClick = {
-                                        SandboxSessionManager.persistCloneSession(sandboxPath, currentLoadedUrl)
-                                        finish()
-                                    },
-                                    modifier = Modifier.size(34.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "Exit Clone to Dual Space",
-                                        tint = Color(0xFF94A3B8),
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-
-                                Spacer(modifier = Modifier.width(6.dp))
-
                                 AppIconWithBadge(
                                     packageName = originalPkg,
                                     appName = customName,
                                     cloneNumber = cloneNumber,
                                     badgeColorHex = 0xFF00E5FFL,
-                                    iconSize = 32.dp
+                                    iconSize = 68.dp
                                 )
 
-                                Spacer(modifier = Modifier.width(8.dp))
+                                Spacer(modifier = Modifier.height(14.dp))
+
+                                Text(
+                                    text = customName,
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White
+                                )
+
+                                Spacer(modifier = Modifier.height(4.dp))
+
+                                Text(
+                                    text = "Direct Native Clone #$cloneNumber • $accountTag",
+                                    color = Color(0xFF00E5FF),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+
+                                Spacer(modifier = Modifier.height(16.dp))
 
                                 Column(
                                     modifier = Modifier
-                                        .weight(1f)
-                                        .clickable { isHeaderExpanded = !isHeaderExpanded }
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(
-                                            text = customName,
-                                            color = Color.White,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 13.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(4.dp))
-                                                .background(Color(0xFF00E676).copy(alpha = 0.18f))
-                                                .padding(horizontal = 5.dp, vertical = 1.dp)
-                                        ) {
-                                            Text(
-                                                text = accountTag,
-                                                color = Color(0xFF00E676),
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                maxLines = 1
-                                            )
-                                        }
-                                    }
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(
-                                            imageVector = Icons.Default.VerifiedUser,
-                                            contentDescription = null,
-                                            tint = Color(0xFF00E5FF),
-                                            modifier = Modifier.size(11.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(3.dp))
-                                        Text(
-                                            text = "In-App Clone #$cloneNumber • ID: $virtualDeviceId",
-                                            color = Color(0xFF94A3B8),
-                                            fontSize = 10.sp,
-                                            fontFamily = FontFamily.Monospace,
-                                            maxLines = 1
-                                        )
-                                    }
-                                }
-
-                                // Back inside cloned app
-                                IconButton(
-                                    onClick = {
-                                        if (activeWebView?.canGoBack() == true) {
-                                            activeWebView?.goBack()
-                                        }
-                                    },
-                                    modifier = Modifier.size(32.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                        contentDescription = "Navigate Back",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-
-                                // Mobile / Desktop Mode Toggle (Helpful for WhatsApp Web / Messenger)
-                                IconButton(
-                                    onClick = {
-                                        isDesktopMode = !isDesktopMode
-                                        activeWebView?.let { wv ->
-                                            wv.settings.userAgentString =
-                                                SandboxSessionManager.buildIsolatedUserAgent(
-                                                    cloneNumber = cloneNumber,
-                                                    virtualDeviceId = virtualDeviceId,
-                                                    desktopMode = isDesktopMode
-                                                )
-                                            wv.settings.useWideViewPort = true
-                                            wv.settings.loadWithOverviewMode = true
-                                            wv.reload()
-                                        }
-                                        Toast.makeText(
-                                            this@CloneLauncherActivity,
-                                            if (isDesktopMode) "Switched to Desktop View" else "Switched to Mobile View",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                    },
-                                    modifier = Modifier.size(32.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = if (isDesktopMode) Icons.Default.Computer else Icons.Default.PhoneAndroid,
-                                        contentDescription = "Toggle Desktop/Mobile Mode",
-                                        tint = if (isDesktopMode) Color(0xFF00E5FF) else Color(0xFF94A3B8),
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-
-                                // Reload button
-                                IconButton(
-                                    onClick = { activeWebView?.reload() },
-                                    modifier = Modifier.size(32.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Refresh,
-                                        contentDescription = "Reload Clone",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-
-                                // Expand/Collapse Sandbox Controls
-                                IconButton(
-                                    onClick = { isHeaderExpanded = !isHeaderExpanded },
-                                    modifier = Modifier.size(32.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = if (isHeaderExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                        contentDescription = "More Clone Options",
-                                        tint = Color(0xFF00E5FF),
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                            }
-
-                            // Expandable Sandbox Drawer for Resetting Account Session or Changing App Portal URL
-                            AnimatedVisibility(visible = isHeaderExpanded) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    modifier = Modifier
                                         .fillMaxWidth()
+                                        .clip(RoundedCornerShape(14.dp))
                                         .background(Color(0xFF090D16))
-                                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                                        .padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    TextButton(
-                                        onClick = { showUrlEditorDialog = true }
-                                    ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
                                         Icon(
-                                            imageVector = Icons.Default.Edit,
+                                            imageVector = if (isCloneInstalled) {
+                                                Icons.Default.CheckCircle
+                                            } else {
+                                                Icons.Default.VerifiedUser
+                                            },
                                             contentDescription = null,
-                                            tint = Color(0xFF00E5FF),
-                                            modifier = Modifier.size(15.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(
-                                            text = "Set App URL",
-                                            color = Color(0xFF00E5FF),
-                                            fontSize = 12.sp
-                                        )
-                                    }
-
-                                    TextButton(
-                                        onClick = {
-                                            SandboxSessionManager.wipeCloneSession(sandboxPath) {
-                                                activeWebView?.clearCache(true)
-                                                activeWebView?.clearHistory()
-                                                activeWebView?.loadUrl(endpointConfig.entryUrl)
-                                                Toast.makeText(
-                                                    this@CloneLauncherActivity,
-                                                    "Logged out & cleared session for $customName only!",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                            }
-                                            isHeaderExpanded = false
-                                        }
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.LockReset,
-                                            contentDescription = null,
-                                            tint = Color(0xFFFF5252),
+                                            tint = if (isCloneInstalled) Color(0xFF00E676) else Color(0xFF00E5FF),
                                             modifier = Modifier.size(16.dp)
                                         )
-                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
                                         Text(
-                                            text = "Logout / Reset Clone #$cloneNumber",
-                                            color = Color(0xFFFF5252),
-                                            fontSize = 12.sp
+                                            text = if (isCloneInstalled) {
+                                                "Status: Direct Native Clone Installed & Ready"
+                                            } else {
+                                                "Status: Standalone Native APK Signed (V1 + V2)"
+                                            },
+                                            color = if (isCloneInstalled) Color(0xFF00E676) else Color(0xFF00E5FF),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
                                         )
                                     }
-                                }
-                            }
-
-                            if (loadProgress in 1..99) {
-                                LinearProgressIndicator(
-                                    progress = { loadProgress / 100f },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(2.dp),
-                                    color = Color(0xFF00E5FF),
-                                    trackColor = Color.Transparent
-                                )
-                            }
-                        }
-
-                        // Main In-App Clone Container Body
-                        if (!isSessionMounted) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    CircularProgressIndicator(color = Color(0xFF00E5FF))
-                                    Spacer(modifier = Modifier.height(12.dp))
                                     Text(
-                                        text = "Mounting Isolated Account Slot #$cloneNumber…",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.SemiBold
+                                        text = "Clone Package: $clonedPkg",
+                                        color = Color(0xFFCBD5E1),
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace
                                     )
                                     Text(
-                                        text = "Loading private cookies & storage for $customName",
+                                        text = "Original Package: $originalPkg",
                                         color = Color(0xFF94A3B8),
-                                        fontSize = 12.sp
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace
                                     )
-                                }
-                            }
-                        } else {
-                            AndroidView(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f),
-                                factory = { ctx ->
-                                    WebView(ctx).apply {
-                                        layoutParams = ViewGroup.LayoutParams(
-                                            ViewGroup.LayoutParams.MATCH_PARENT,
-                                            ViewGroup.LayoutParams.MATCH_PARENT
+                                    builtApkFile?.let { f ->
+                                        Text(
+                                            text = "Signed APK Size: ${ApkCloneBuilder.formatBytes(f.length())}",
+                                            color = Color(0xFF00E676),
+                                            fontSize = 11.sp,
+                                            fontFamily = FontFamily.Monospace
                                         )
-                                        val cookieManager = CookieManager.getInstance()
-                                        cookieManager.setAcceptCookie(true)
-                                        cookieManager.setAcceptThirdPartyCookies(this, true)
-
-                                        settings.apply {
-                                            javaScriptEnabled = true
-                                            domStorageEnabled = true
-                                            databaseEnabled = true
-                                            loadsImagesAutomatically = true
-                                            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                                            useWideViewPort = true
-                                            loadWithOverviewMode = true
-                                            setSupportZoom(true)
-                                            builtInZoomControls = true
-                                            displayZoomControls = false
-                                            javaScriptCanOpenWindowsAutomatically = true
-                                            mediaPlaybackRequiresUserGesture = false
-                                            userAgentString = SandboxSessionManager.buildIsolatedUserAgent(
-                                                cloneNumber = cloneNumber,
-                                                virtualDeviceId = virtualDeviceId,
-                                                desktopMode = isDesktopMode
-                                            )
-                                        }
-
-                                        webViewClient = object : WebViewClient() {
-                                            override fun shouldOverrideUrlLoading(
-                                                view: WebView?,
-                                                request: WebResourceRequest?
-                                            ): Boolean {
-                                                val targetUri = request?.url ?: return false
-                                                val scheme = targetUri.scheme?.lowercase() ?: ""
-                                                // Keep ALL http/https navigation strictly inside the clone container
-                                                // so it NEVER jumps out to the phone's external installed app!
-                                                if (scheme == "http" || scheme == "https") {
-                                                    return false
-                                                }
-                                                // Block intent:// or market:// deep links from escaping to the host phone app
-                                                return true
-                                            }
-
-                                            override fun onPageStarted(
-                                                view: WebView?,
-                                                url: String?,
-                                                favicon: Bitmap?
-                                            ) {
-                                                super.onPageStarted(view, url, favicon)
-                                                if (!url.isNullOrBlank()) {
-                                                    currentUrl = url
-                                                    currentLoadedUrl = url
-                                                }
-                                            }
-
-                                            override fun onPageFinished(view: WebView?, url: String?) {
-                                                super.onPageFinished(view, url)
-                                                if (!url.isNullOrBlank()) {
-                                                    currentUrl = url
-                                                    currentLoadedUrl = url
-                                                }
-                                                // Persist cookies exclusively into this clone's sandbox vault
-                                                SandboxSessionManager.persistCloneSession(
-                                                    sandboxDir = sandboxPath,
-                                                    currentUrl = url
-                                                )
-                                            }
-                                        }
-
-                                        webChromeClient = object : WebChromeClient() {
-                                            override fun onProgressChanged(
-                                                view: WebView?,
-                                                newProgress: Int
-                                            ) {
-                                                loadProgress = newProgress
-                                            }
-                                        }
-
-                                        activeWebView = this
-                                        loadUrl(currentUrl)
                                     }
                                 }
-                            )
-                        }
-                    }
-                }
 
-                if (showUrlEditorDialog) {
-                    var editedUrl by remember { mutableStateOf(currentUrl) }
-                    Dialog(onDismissRequest = { showUrlEditorDialog = false }) {
-                        Surface(
-                            shape = RoundedCornerShape(20.dp),
-                            color = Color(0xFF111827),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(1.dp, Color(0xFF283548), RoundedCornerShape(20.dp))
-                        ) {
-                            Column(modifier = Modifier.padding(20.dp)) {
-                                Text(
-                                    text = "Custom Portal URL for $customName",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = Color.White
-                                )
-                                Spacer(modifier = Modifier.height(10.dp))
-                                OutlinedTextField(
-                                    value = editedUrl,
-                                    onValueChange = { editedUrl = it },
-                                    label = { Text("https://…") },
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                                Spacer(modifier = Modifier.height(14.dp))
-                                Row(
-                                    horizontalArrangement = Arrangement.End,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    TextButton(onClick = { showUrlEditorDialog = false }) {
-                                        Text("Cancel")
+                                Spacer(modifier = Modifier.height(18.dp))
+
+                                if (isBuildingApk) {
+                                    CircularProgressIndicator(color = Color(0xFF00E5FF))
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        text = "Rebuilding & signing direct native APK ($clonedPkg)…\nPlease wait a moment.",
+                                        color = Color(0xFF94A3B8),
+                                        fontSize = 13.sp,
+                                        textAlign = TextAlign.Center
+                                    )
+                                } else if (buildError != null) {
+                                    Text(
+                                        text = buildError!!,
+                                        color = Color(0xFFFF5252),
+                                        fontSize = 13.sp,
+                                        textAlign = TextAlign.Center
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    OutlinedButton(onClick = { finish() }) {
+                                        Text("Back")
                                     }
-                                    Spacer(modifier = Modifier.width(8.dp))
+                                } else if (isCloneInstalled) {
+                                    Button(
+                                        onClick = { launchInstalledClonePackage(clonedPkg) },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = Color(0xFF00E676),
+                                            contentColor = Color(0xFF04131A)
+                                        ),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.RocketLaunch,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "Open Installed $customName",
+                                            fontWeight = FontWeight.ExtraBold
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    OutlinedButton(
+                                        onClick = { finish() },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text("Back to OmniSpace")
+                                    }
+                                } else {
+                                    Text(
+                                        text = "Install this signed clone APK once to run '$customName' as a 100% direct native app with its own separate login account:",
+                                        color = Color(0xFFE2E8F0),
+                                        fontSize = 12.sp,
+                                        textAlign = TextAlign.Center
+                                    )
+                                    Spacer(modifier = Modifier.height(14.dp))
                                     Button(
                                         onClick = {
-                                            val normalized = if (
-                                                editedUrl.startsWith("http://") ||
-                                                editedUrl.startsWith("https://")
-                                            ) {
-                                                editedUrl.trim()
-                                            } else {
-                                                "https://${editedUrl.trim()}"
+                                            builtApkFile?.let { file ->
+                                                ApkCloneBuilder.promptSystemPackageInstaller(
+                                                    this@CloneLauncherActivity,
+                                                    file
+                                                )
                                             }
-                                            SandboxSessionManager.saveCustomEndpoint(sandboxPath, normalized)
-                                            currentUrl = normalized
-                                            activeWebView?.loadUrl(normalized)
-                                            showUrlEditorDialog = false
                                         },
                                         colors = ButtonDefaults.buttonColors(
                                             containerColor = Color(0xFF00E5FF),
                                             contentColor = Color(0xFF04131A)
-                                        )
+                                        ),
+                                        modifier = Modifier.fillMaxWidth()
                                     ) {
-                                        Text("Load in Clone", fontWeight = FontWeight.Bold)
+                                        Icon(
+                                            imageVector = Icons.Default.InstallMobile,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "Install Direct Clone APK (#$cloneNumber)",
+                                            fontWeight = FontWeight.ExtraBold
+                                        )
+                                    }
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                scope.launch {
+                                                    ApkCloneBuilder.shareCloneApk(
+                                                        this@CloneLauncherActivity,
+                                                        dummyEntity.copy(
+                                                            apkOutputPath = builtApkFile?.absolutePath ?: ""
+                                                        )
+                                                    )
+                                                }
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Share,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Save/Share APK")
+                                        }
+
+                                        OutlinedButton(
+                                            onClick = { finish() },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text("Back")
+                                        }
                                     }
                                 }
                             }
@@ -585,19 +423,22 @@ class CloneLauncherActivity : ComponentActivity() {
         }
     }
 
-    override fun onPause() {
-        super.onPause()
-        if (currentSandboxPath.isNotEmpty()) {
-            SandboxSessionManager.persistCloneSession(currentSandboxPath, currentLoadedUrl)
+    private fun launchInstalledClonePackage(clonedPkg: String) {
+        val launchIntent = packageManager.getLaunchIntentForPackage(clonedPkg)
+        if (launchIntent != null) {
+            launchIntent.apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
+                addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(launchIntent)
+            finish()
+        } else {
+            Toast.makeText(
+                this,
+                "Clone package $clonedPkg is not installed yet. Please tap 'Install Direct Clone APK' first.",
+                Toast.LENGTH_LONG
+            ).show()
         }
-    }
-
-    override fun onDestroy() {
-        if (currentSandboxPath.isNotEmpty()) {
-            SandboxSessionManager.persistCloneSession(currentSandboxPath, currentLoadedUrl)
-        }
-        activeWebView?.destroy()
-        activeWebView = null
-        super.onDestroy()
     }
 }

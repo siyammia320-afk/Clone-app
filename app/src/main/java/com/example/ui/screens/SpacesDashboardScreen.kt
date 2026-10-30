@@ -530,7 +530,7 @@ private fun ClonedAppCard(
                     )
                     Spacer(modifier = Modifier.width(5.dp))
                     Text(
-                        text = "Add to Phone Home",
+                        text = "Install Clone APK",
                         color = Color(0xFF00E676),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold
